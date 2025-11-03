@@ -122,6 +122,7 @@ async function processRequiredActions(client, requiredActions) {
   }, {});
 
   const promises = [];
+  logger.debug('[ToolService] Starting to process required actions');
 
   /** @type {Action[]} */
   let actionSets = [];
@@ -139,6 +140,7 @@ async function processRequiredActions(client, requiredActions) {
 
     const handleToolOutput = async (output) => {
       requiredActions[i].output = output;
+      logger.info(`[ToolService] Tool output for ${currentAction.tool} (tool_call_id=${currentAction.toolCallId}):`, { output });
 
       /** @type {FunctionToolCall & PartMetadata} */
       const toolCall = {
@@ -318,8 +320,8 @@ async function processRequiredActions(client, requiredActions) {
 
     const handleToolError = (error) => {
       logger.error(
-        `tool_call_id: ${currentAction.toolCallId} | Error processing tool ${currentAction.tool}`,
-        error,
+        `[ToolService] tool_call_id: ${currentAction.toolCallId} | Error processing tool ${currentAction.tool}`,
+        error
       );
       return {
         tool_call_id: currentAction.toolCallId,
@@ -335,10 +337,12 @@ async function processRequiredActions(client, requiredActions) {
       promises.push(promise);
     } catch (error) {
       const toolOutputError = handleToolError(error);
+      logger.error('[ToolService] Synchronous error in processRequiredActions', error);
       promises.push(Promise.resolve(toolOutputError));
     }
   }
 
+  logger.info('[ToolService] Finished processing required actions');
   return {
     tool_outputs: await Promise.all(promises),
   };

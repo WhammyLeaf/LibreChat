@@ -42,7 +42,7 @@ const { getOpenAIClient } = require('./helpers');
  * @returns {void}
  */
 const chatV2 = async (req, res) => {
-  logger.debug('[/assistants/chat/] req.body', req.body);
+  logger.info('[/assistants/chat/v2] Incoming request', { body: req.body });
   const appConfig = req.config;
 
   /** @type {{files: MongoFile[]}} */
@@ -107,21 +107,30 @@ const chatV2 = async (req, res) => {
   });
 
   const handleError = createErrorHandler({ req, res, getContext });
+  // Wrap handleError to add extra logging
+  const logHandleError = async (error) => {
+    logger.error('[/assistants/chat/v2] handleError called', { error });
+    return handleError(error);
+  };
 
   try {
+    logger.info('[/assistants/chat/v2] Handler start');
     res.on('close', async () => {
+      logger.warn('[/assistants/chat/v2] res.on(close) fired');
       if (!completedRun) {
-        await handleError(new Error('Request closed'));
+        await logHandleError(new Error('Request closed'));
       }
     });
 
     if (convoId && !_thread_id) {
       completedRun = true;
+      logger.error('[/assistants/chat/v2] Missing thread_id for existing conversation');
       throw new Error('Missing thread_id for existing conversation');
     }
 
     if (!assistant_id) {
       completedRun = true;
+      logger.error('[/assistants/chat/v2] Missing assistant_id');
       throw new Error('Missing assistant_id');
     }
 
@@ -336,6 +345,7 @@ const chatV2 = async (req, res) => {
         body.model = openai._options.model;
         openai.attachedFileIds = attachedFileIds;
         if (retry) {
+          logger.info('[/assistants/chat/v2] Retrying runAssistant after IN_PROGRESS');
           response = await runAssistant({
             openai,
             thread_id,
@@ -360,6 +370,7 @@ const chatV2 = async (req, res) => {
         sendInitialResponse();
 
         // todo: retry logic
+        logger.info('[/assistants/chat/v2] Calling runAssistant for Azure endpoint');
         response = await runAssistant({ openai, thread_id, run_id });
         return;
       }
@@ -393,6 +404,7 @@ const chatV2 = async (req, res) => {
         // },
       });
 
+      logger.info('[/assistants/chat/v2] Calling streamRunManager.runAssistant');
       await streamRunManager.runAssistant({
         thread_id,
         body,
@@ -403,17 +415,18 @@ const chatV2 = async (req, res) => {
     };
 
     await processRun();
-    logger.debug('[/assistants/chat/] response', {
+    logger.info('[/assistants/chat/v2] response', {
       run: response.run,
       steps: response.steps,
     });
 
     if (response.run.status === RunStatus.CANCELLED) {
-      logger.debug('[/assistants/chat/] Run cancelled, handled by `abortRun`');
+      logger.warn('[/assistants/chat/v2] Run cancelled, handled by `abortRun`');
       return res.end();
     }
 
     if (response.run.status === RunStatus.IN_PROGRESS) {
+      logger.info('[/assistants/chat/v2] Run still IN_PROGRESS, retrying processRun');
       processRun(true);
     }
 
@@ -434,6 +447,7 @@ const chatV2 = async (req, res) => {
       iconURL: endpointOption.iconURL,
     };
 
+    logger.info('[/assistants/chat/v2] Sending final event');
     sendEvent(res, {
       final: true,
       conversation,
@@ -445,11 +459,14 @@ const chatV2 = async (req, res) => {
     res.end();
 
     if (userMessagePromise) {
+      logger.info('[/assistants/chat/v2] Awaiting userMessagePromise');
       await userMessagePromise;
     }
+    logger.info('[/assistants/chat/v2] Saving assistant message');
     await saveAssistantMessage(req, { ...responseMessage, model });
 
     if (parentMessageId === Constants.NO_PARENT && !_thread_id) {
+      logger.info('[/assistants/chat/v2] Adding title');
       addTitle(req, {
         text,
         responseText: response.text,
@@ -458,6 +475,7 @@ const chatV2 = async (req, res) => {
       });
     }
 
+    logger.info('[/assistants/chat/v2] Adding thread metadata');
     await addThreadMetadata({
       openai,
       thread_id,
@@ -466,9 +484,11 @@ const chatV2 = async (req, res) => {
     });
 
     if (!response.run.usage) {
+      logger.info('[/assistants/chat/v2] No run.usage, sleeping before retrieve');
       await sleep(3000);
       completedRun = await openai.beta.threads.runs.retrieve(response.run.id, { thread_id });
       if (completedRun.usage) {
+        logger.info('[/assistants/chat/v2] Recording usage after retrieve');
         await recordUsage({
           ...completedRun.usage,
           user: req.user.id,
@@ -477,6 +497,7 @@ const chatV2 = async (req, res) => {
         });
       }
     } else {
+      logger.info('[/assistants/chat/v2] Recording usage from response.run.usage');
       await recordUsage({
         ...response.run.usage,
         user: req.user.id,
@@ -485,7 +506,8 @@ const chatV2 = async (req, res) => {
       });
     }
   } catch (error) {
-    await handleError(error);
+    logger.error('[/assistants/chat/v2] Caught error in main handler', error);
+    await logHandleError(error);
   }
 };
 

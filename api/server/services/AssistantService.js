@@ -80,14 +80,18 @@ async function createOnTextProgress({
  * @return {Promise<OpenAIAssistantFinish | OpenAIAssistantAction[] | ThreadMessage[] | RequiredActionFunctionToolCall[]>}
  */
 async function getResponse({ openai, run_id, thread_id }) {
+  logger.info(`[AssistantService] getResponse called for run_id=${run_id}, thread_id=${thread_id}`);
   const run = await waitForRun({ openai, run_id, thread_id, pollIntervalMs: 2000 });
+  logger.info(`[AssistantService] getResponse: run status for run_id=${run_id} is ${run.status}`);
 
   if (run.status === RunStatus.COMPLETED) {
+    logger.info(`[AssistantService] getResponse: run_id=${run_id} COMPLETED`);
     const messages = await openai.beta.threads.messages.list(thread_id, defaultOrderQuery);
     const newMessages = messages.data.filter((msg) => msg.run_id === run_id);
-
+    logger.debug(`[AssistantService] getResponse: returning ${newMessages.length} messages for run_id=${run_id}`);
     return newMessages;
   } else if (run.status === RunStatus.REQUIRES_ACTION) {
+    logger.info(`[AssistantService] getResponse: run_id=${run_id} REQUIRES_ACTION`);
     const actions = [];
     run.required_action?.submit_tool_outputs.tool_calls.forEach((item) => {
       const functionCall = item.function;
@@ -100,11 +104,12 @@ async function getResponse({ openai, run_id, thread_id }) {
         thread_id,
       });
     });
-
+    logger.debug(`[AssistantService] getResponse: returning ${actions.length} actions for run_id=${run_id}`);
     return actions;
   }
 
   const runInfo = JSON.stringify(run, null, 2);
+  logger.error(`[AssistantService] getResponse: Unexpected run status ${run.status} for run_id=${run_id}`);
   throw new Error(`Unexpected run status ${run.status}.\nFull run info:\n\n${runInfo}`);
 }
 
@@ -356,22 +361,14 @@ async function runAssistant({
   const in_progress = inProgress ?? createInProgressHandler(openai, thread_id, messages);
   openai.in_progress = in_progress;
 
+  logger.info(`[AssistantService] runAssistant called for run_id=${run_id}, thread_id=${thread_id}`);
   const runManager = new RunManager({
     in_progress,
     final: async ({ step, runStatus, stepsByStatus }) => {
-      logger.debug(`[runAssistant] Final step for ${run_id} with status ${runStatus}`, step);
+      logger.info(`[AssistantService] runAssistant final step for run_id=${run_id} with status ${runStatus}`);
+      logger.debug(`[AssistantService] runAssistant final step details:`, step);
 
       const promises = [];
-      // promises.push(
-      //   openai.beta.threads.messages.list(thread_id, defaultOrderQuery),
-      // );
-
-      // const finalSteps = stepsByStatus[runStatus];
-      // for (const stepPromise of finalSteps) {
-      //   promises.push(stepPromise);
-      // }
-
-      // loop across all statuses
       for (const [_status, stepsPromises] of Object.entries(stepsByStatus)) {
         promises.push(...stepsPromises);
       }
@@ -383,15 +380,13 @@ async function runAssistant({
         const incompleteToolCallSteps = finalSteps.filter(
           (s) => s && s.type === StepTypes.TOOL_CALLS && !openai.completeToolCallSteps.has(s.id),
         );
+        logger.info(`[AssistantService] runAssistant found ${incompleteToolCallSteps.length} incomplete tool call steps for run_id=${run_id}`);
         for (const incompleteToolCallStep of incompleteToolCallSteps) {
           await in_progress({ step: incompleteToolCallStep });
         }
       }
       await in_progress({ step });
-      // const res = resolved.shift();
-      // messages = messages.concat(res.data.filter((msg) => msg && msg.run_id === run_id));
       resolved.push(step);
-      /* Note: no issues without deep cloning, but it's safer to do so */
       steps = klona(finalSteps);
     },
   });
@@ -401,6 +396,7 @@ async function runAssistant({
   const assistantsEndpointConfig = appConfig.endpoints?.[endpoint] ?? {};
   const { pollIntervalMs, timeoutMs } = assistantsEndpointConfig;
 
+  logger.info(`[AssistantService] runAssistant waiting for run_id=${run_id}, thread_id=${thread_id}`);
   const run = await waitForRun({
     openai,
     run_id,
@@ -409,10 +405,10 @@ async function runAssistant({
     pollIntervalMs,
     timeout: timeoutMs,
   });
+  logger.info(`[AssistantService] runAssistant received run status for run_id=${run_id}: ${run.status}`);
 
   if (!run.required_action) {
-    // const { messages: sortedMessages, text } = await processMessages(openai, messages);
-    // return { run, steps, messages: sortedMessages, text };
+    logger.info(`[AssistantService] runAssistant: run_id=${run_id} has no required_action, returning final result`);
     const sortedMessages = messages.sort((a, b) => a.created_at - b.created_at);
     return {
       run,
@@ -423,6 +419,7 @@ async function runAssistant({
     };
   }
 
+  logger.info(`[AssistantService] runAssistant: run_id=${run_id} requires action, preparing tool outputs`);
   const { submit_tool_outputs } = run.required_action;
   const actions = submit_tool_outputs.tool_calls.map((item) => {
     const functionCall = item.function;
@@ -436,13 +433,15 @@ async function runAssistant({
     };
   });
 
+  logger.debug(`[AssistantService] runAssistant: submitting ${actions.length} tool outputs for run_id=${run_id}`);
   const tool_outputs = await processRequiredActions(openai, actions);
+  logger.info(`[AssistantService] runAssistant: tool outputs submitted for run_id=${run_id}, submitting to OpenAI`);
   const toolRun = await openai.beta.threads.runs.submitToolOutputs(run.id, {
     thread_id: run.thread_id,
     tool_outputs,
   });
 
-  // Recursive call with accumulated steps and messages
+  logger.info(`[AssistantService] runAssistant: recursively calling runAssistant for run_id=${toolRun.id}`);
   return await runAssistant({
     openai,
     run_id: toolRun.id,

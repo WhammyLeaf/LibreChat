@@ -99,12 +99,14 @@ export class MCPConnection extends EventEmitter {
 
   setRequestHeaders(headers: Record<string, string> | null): void {
     if (!headers) {
+      logger.debug(`[MCPConnection] setRequestHeaders called with null/undefined headers`);
       return;
     }
     const normalizedHeaders: Record<string, string> = {};
     for (const [key, value] of Object.entries(headers)) {
       normalizedHeaders[key.toLowerCase()] = value;
     }
+    logger.info(`[MCPConnection] Setting request headers:`, normalizedHeaders);
     this.requestHeaders = normalizedHeaders;
   }
 
@@ -114,6 +116,7 @@ export class MCPConnection extends EventEmitter {
 
   constructor(params: MCPConnectionParams) {
     super();
+    logger.info(`[MCPConnection] Constructing MCPConnection for serverName=${params.serverName}`);
     this.options = params.serverConfig;
     this.serverName = params.serverName;
     this.userId = params.userId;
@@ -134,6 +137,7 @@ export class MCPConnection extends EventEmitter {
     );
 
     this.setupEventListeners();
+    logger.info(`[MCPConnection] MCPConnection constructed for serverName=${params.serverName}`);
   }
 
   /** Helper to generate consistent log prefixes */
@@ -192,10 +196,11 @@ export class MCPConnection extends EventEmitter {
 
   private emitError(error: unknown, errorContext: string): void {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.error(`${this.getLogPrefix()} ${errorContext}: ${errorMessage}`);
+    logger.error(`${this.getLogPrefix()} ${errorContext}: ${errorMessage}`, { error });
   }
 
   private constructTransport(options: t.MCPOptions): Transport {
+    logger.info(`${this.getLogPrefix()} [MCPConnection] constructTransport called`, { options });
     try {
       let type: t.MCPOptions['type'];
       if (isStdioOptions(options)) {
@@ -213,11 +218,14 @@ export class MCPConnection extends EventEmitter {
         );
       }
 
-      switch (type) {
+  logger.info(`${this.getLogPrefix()} [MCPConnection] Transport type resolved: ${type}`);
+  switch (type) {
         case 'stdio':
           if (!isStdioOptions(options)) {
+            logger.error(`${this.getLogPrefix()} [MCPConnection] Invalid options for stdio transport`, { options });
             throw new Error('Invalid options for stdio transport.');
           }
+          logger.info(`${this.getLogPrefix()} [MCPConnection] Creating StdioClientTransport`);
           return new StdioClientTransport({
             command: options.command,
             args: options.args,
@@ -228,13 +236,16 @@ export class MCPConnection extends EventEmitter {
 
         case 'websocket':
           if (!isWebSocketOptions(options)) {
+            logger.error(`${this.getLogPrefix()} [MCPConnection] Invalid options for websocket transport`, { options });
             throw new Error('Invalid options for websocket transport.');
           }
           this.url = options.url;
+          logger.info(`${this.getLogPrefix()} [MCPConnection] Creating WebSocketClientTransport for url=${options.url}`);
           return new WebSocketClientTransport(new URL(options.url));
 
         case 'sse': {
           if (!isSSEOptions(options)) {
+            logger.error(`${this.getLogPrefix()} [MCPConnection] Invalid options for sse transport`, { options });
             throw new Error('Invalid options for sse transport.');
           }
           this.url = options.url;
@@ -251,6 +262,7 @@ export class MCPConnection extends EventEmitter {
           }
 
           const timeoutValue = this.timeout || DEFAULT_TIMEOUT;
+          logger.info(`${this.getLogPrefix()} [MCPConnection] Creating SSEClientTransport with timeout=${timeoutValue}`);
           const transport = new SSEClientTransport(url, {
             requestInit: {
               headers,
@@ -291,6 +303,7 @@ export class MCPConnection extends EventEmitter {
 
         case 'streamable-http': {
           if (!isStreamableHTTPOptions(options)) {
+            logger.error(`${this.getLogPrefix()} [MCPConnection] Invalid options for streamable-http transport`, { options });
             throw new Error('Invalid options for streamable-http transport.');
           }
           this.url = options.url;
@@ -306,6 +319,7 @@ export class MCPConnection extends EventEmitter {
             headers['Authorization'] = `Bearer ${this.oauthTokens.access_token}`;
           }
 
+          logger.info(`${this.getLogPrefix()} [MCPConnection] Creating StreamableHTTPClientTransport`);
           const transport = new StreamableHTTPClientTransport(url, {
             requestInit: {
               headers,
@@ -428,15 +442,19 @@ export class MCPConnection extends EventEmitter {
   }
 
   async connectClient(): Promise<void> {
+    logger.info(`${this.getLogPrefix()} [MCPConnection] connectClient called`);
     if (this.connectionState === 'connected') {
+      logger.info(`${this.getLogPrefix()} [MCPConnection] Already connected`);
       return;
     }
 
     if (this.connectPromise) {
+      logger.info(`${this.getLogPrefix()} [MCPConnection] connectPromise already in progress`);
       return this.connectPromise;
     }
 
     if (this.shouldStopReconnecting) {
+      logger.warn(`${this.getLogPrefix()} [MCPConnection] shouldStopReconnecting is true`);
       return;
     }
 
@@ -448,6 +466,7 @@ export class MCPConnection extends EventEmitter {
           try {
             await this.client.close();
             this.transport = null;
+            logger.info(`${this.getLogPrefix()} [MCPConnection] Closed previous transport`);
           } catch (error) {
             logger.warn(`${this.getLogPrefix()} Error closing connection:`, error);
           }
@@ -457,6 +476,7 @@ export class MCPConnection extends EventEmitter {
         this.setupTransportDebugHandlers();
 
         const connectTimeout = this.options.initTimeout ?? 120000;
+        logger.info(`${this.getLogPrefix()} [MCPConnection] Connecting with timeout=${connectTimeout}`);
         await Promise.race([
           this.client.connect(this.transport),
           new Promise((_resolve, reject) =>
@@ -470,6 +490,7 @@ export class MCPConnection extends EventEmitter {
         this.connectionState = 'connected';
         this.emit('connectionChange', 'connected');
         this.reconnectAttempts = 0;
+        logger.info(`${this.getLogPrefix()} [MCPConnection] Connected successfully`);
       } catch (error) {
         // Check if it's an OAuth authentication error
         if (this.isOAuthError(error)) {
@@ -552,6 +573,7 @@ export class MCPConnection extends EventEmitter {
 
         this.connectionState = 'error';
         this.emit('connectionChange', 'error');
+        logger.error(`${this.getLogPrefix()} [MCPConnection] Connection failed`, error);
         throw error;
       } finally {
         this.connectPromise = null;

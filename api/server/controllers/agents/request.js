@@ -12,16 +12,20 @@ const { saveMessage } = require('~/models');
 function createCloseHandler(abortController) {
   return function (manual) {
     if (!manual) {
-      logger.debug('[AgentController] Request closed');
+      logger.info('[AgentController] Request closed (res.on close event)');
     }
     if (!abortController) {
+      logger.warn('[AgentController] No abortController present in close handler');
       return;
     } else if (abortController.signal.aborted) {
+      logger.info('[AgentController] AbortController already aborted in close handler');
       return;
     } else if (abortController.requestCompleted) {
+      logger.info('[AgentController] Request already completed in close handler');
       return;
     }
 
+    logger.warn('[AgentController] Aborting request due to close event');
     abortController.abort();
     logger.debug('[AgentController] Request aborted on close');
   };
@@ -78,7 +82,7 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
 
   // Create a function to handle final cleanup
   const performCleanup = () => {
-    logger.debug('[AgentController] Performing cleanup');
+    logger.info('[AgentController] Performing cleanup');
     if (Array.isArray(cleanupHandlers)) {
       for (const handler of cleanupHandlers) {
         try {
@@ -93,12 +97,13 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
 
     // Clean up abort controller
     if (abortKey) {
-      logger.debug('[AgentController] Cleaning up abort controller');
+      logger.info('[AgentController] Cleaning up abort controller');
       cleanupAbortController(abortKey);
     }
 
     // Dispose client properly
     if (client) {
+      logger.info('[AgentController] Disposing client');
       disposeClient(client);
     }
 
@@ -114,12 +119,14 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
 
     // Clear request data map
     if (requestDataMap.has(req)) {
+      logger.info('[AgentController] Clearing requestDataMap for req');
       requestDataMap.delete(req);
     }
-    logger.debug('[AgentController] Cleanup completed');
+    logger.info('[AgentController] Cleanup completed');
   };
 
   try {
+    logger.info('[AgentController] Begin request processing');
     let prelimAbortController = new AbortController();
     const prelimCloseHandler = createCloseHandler(prelimAbortController);
     res.on('close', prelimCloseHandler);
@@ -132,6 +139,7 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
       }
     };
     cleanupHandlers.push(removePrelimHandler);
+    logger.debug('[AgentController] Initializing client...');
     /** @type {{ client: TAgentClient; userMCPAuthMap?: Record<string, Record<string, string>> }} */
     const result = await initializeClient({
       req,
@@ -140,6 +148,7 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
       signal: prelimAbortController.signal,
     });
     if (prelimAbortController.signal?.aborted) {
+      logger.warn('[AgentController] Request was aborted before initialization could complete');
       prelimAbortController = null;
       throw new Error('Request was aborted before initialization could complete');
     } else {
@@ -151,11 +160,13 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
 
     // Register client with finalization registry if available
     if (clientRegistry) {
+      logger.debug('[AgentController] Registering client with registry');
       clientRegistry.register(client, { userId }, client);
     }
 
     // Store request data in WeakMap keyed by req object
     requestDataMap.set(req, { client });
+    logger.debug('[AgentController] Stored client in requestDataMap');
 
     // Use WeakRef to allow GC but still access content if it exists
     const contentRef = new WeakRef(client.contentParts || []);
@@ -187,6 +198,7 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
         logger.error('[AgentController] Error removing close listener', e);
       }
     });
+    logger.debug('[AgentController] Created abort controller and close handler');
 
     const messageOptions = {
       user: userId,
@@ -207,7 +219,9 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
       },
     };
 
+    logger.info('[AgentController] Calling client.sendMessage...');
     let response = await client.sendMessage(text, messageOptions);
+    logger.info('[AgentController] client.sendMessage completed');
 
     // Extract what we need and immediately break reference
     const messageId = response.messageId;
@@ -240,7 +254,7 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
     if (!abortController.signal.aborted) {
       // Create a new response object with minimal copies
       const finalResponse = { ...response };
-
+      logger.info('[AgentController] Sending final event and ending response');
       sendEvent(res, {
         final: true,
         conversation,
@@ -252,6 +266,7 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
 
       // Save the message if needed
       if (client.savedMessageIds && !client.savedMessageIds.has(messageId)) {
+        logger.debug('[AgentController] Saving message to database');
         await saveMessage(
           req,
           { ...finalResponse, user: userId },
@@ -262,9 +277,7 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
     // Edge case: sendMessage completed but abort happened during sendCompletion
     // We need to ensure a final event is sent
     else if (!res.headersSent && !res.finished) {
-      logger.debug(
-        '[AgentController] Handling edge case: `sendMessage` completed but aborted during `sendCompletion`',
-      );
+      logger.warn('[AgentController] Handling edge case: `sendMessage` completed but aborted during `sendCompletion`');
 
       const finalResponse = { ...response };
       finalResponse.error = true;
@@ -282,6 +295,7 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
 
     // Save user message if needed
     if (!client.skipSaveUserMessage) {
+      logger.debug('[AgentController] Saving user message to database');
       await saveMessage(req, userMessage, {
         context: "api/server/controllers/agents/request.js - don't skip saving user message",
       });
@@ -294,20 +308,21 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
         response: { ...response },
         client,
       })
-        .then(() => {
-          logger.debug('[AgentController] Title generation started');
-        })
-        .catch((err) => {
-          logger.error('[AgentController] Error in title generation', err);
-        })
-        .finally(() => {
-          logger.debug('[AgentController] Title generation completed');
-          performCleanup();
-        });
+          .then(() => {
+            logger.info('[AgentController] Title generation started');
+          })
+          .catch((err) => {
+            logger.error('[AgentController] Error in title generation', err);
+          })
+          .finally(() => {
+            logger.info('[AgentController] Title generation completed');
+            performCleanup();
+          });
     } else {
       performCleanup();
     }
   } catch (error) {
+    logger.error('[AgentController] Caught error in main handler', error);
     // Handle error without capturing much scope
     handleAbortError(res, req, error, {
       conversationId,
@@ -320,6 +335,7 @@ const AgentController = async (req, res, next, initializeClient, addTitle) => {
         logger.error('[api/server/controllers/agents/request] Error in `handleAbortError`', err);
       })
       .finally(() => {
+        logger.info('[AgentController] Cleanup after error');
         performCleanup();
       });
   }

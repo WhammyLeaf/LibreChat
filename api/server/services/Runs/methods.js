@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { logAxiosError } = require('@librechat/api');
 const { EModelEndpoint } = require('librechat-data-provider');
+const { logger } = require('@librechat/data-schemas');
 
 /**
  * @typedef {Object} RetrieveOptions
@@ -18,6 +19,10 @@ const { EModelEndpoint } = require('librechat-data-provider');
  * @returns {Promise<Object>} The data retrieved from the API.
  */
 async function retrieveRun({ thread_id, run_id, timeout, openai }) {
+  logger.info(`[retrieveRun] Called for thread_id=${thread_id}, run_id=${run_id}, timeout=${timeout}`);
+  logger.debug(`[retrieveRun] Using baseURL=${baseURL}`);
+  logger.debug(`[retrieveRun] Request headers:`, headers);
+  logger.debug(`[retrieveRun] Final URL: ${url}`);
   const appConfig = openai.req.config;
   const { apiKey, baseURL, httpAgent, organization } = openai;
   let url = `${baseURL}/threads/${thread_id}/runs/${run_id}`;
@@ -52,9 +57,12 @@ async function retrieveRun({ thread_id, run_id, timeout, openai }) {
       axiosConfig.httpsAgent = httpAgent;
     }
 
+    logger.info(`[retrieveRun] Sending GET request to ${url}`);
     const response = await axios.get(url, axiosConfig);
+    logger.info(`[retrieveRun] Received response for run_id=${run_id}, status=${response.status}`);
     return response.data;
   } catch (error) {
+    logger.error(`[retrieveRun] Error retrieving run_id=${run_id}:`, error);
     const message = '[retrieveRun] Failed to retrieve run data:';
     throw new Error(logAxiosError({ message, error }));
   }

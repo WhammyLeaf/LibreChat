@@ -7,18 +7,24 @@ const RunManager = require('./RunManager');
 
 async function withTimeout(promise, timeoutMs, timeoutMessage) {
   let timeoutHandle;
-
+  logger.debug(`[withTimeout] Starting promise with timeoutMs=${timeoutMs} | message=${timeoutMessage}`);
   const timeoutPromise = new Promise((_, reject) => {
     timeoutHandle = setTimeout(() => {
-      logger.debug(timeoutMessage);
+      logger.warn(`[withTimeout] Timeout triggered: ${timeoutMessage}`);
       reject(new Error('Operation timed out'));
     }, timeoutMs);
   });
 
   try {
-    return await Promise.race([promise, timeoutPromise]);
+    const result = await Promise.race([promise, timeoutPromise]);
+    logger.debug(`[withTimeout] Promise resolved before timeout.`);
+    return result;
+  } catch (err) {
+    logger.error(`[withTimeout] Promise rejected or timed out:`, err);
+    throw err;
   } finally {
     clearTimeout(timeoutHandle);
+    logger.debug(`[withTimeout] Cleared timeout handle.`);
   }
 }
 
@@ -79,6 +85,7 @@ async function waitForRun({
   const runInfo = `user: ${openai.req.user.id} | thread_id: ${thread_id} | ${runIdLog}`;
   const raceTimeoutMs = 20000;
   let maxRetries = 10;
+  logger.info(`[waitForRun] Starting wait loop for ${runInfo} with timeout=${timeout}`);
   while (timeElapsed < timeout) {
     i++;
     logger.debug(`[heartbeat ${i}] ${runIdLog} | Retrieving run status...`);
@@ -88,6 +95,7 @@ async function waitForRun({
     let startTime = Date.now();
     while (!updatedRun && attempt < maxRetries) {
       try {
+        logger.debug(`[waitForRun] Attempt ${attempt + 1} to retrieve run status for ${runIdLog}`);
         updatedRun = await withTimeout(
           retrieveRun({ thread_id, run_id, timeout: raceTimeoutMs, openai }),
           raceTimeoutMs,
@@ -108,6 +116,7 @@ async function waitForRun({
 
     if (!updatedRun) {
       const errorMessage = `[waitForRun] ${runIdLog} | Run retrieval failed after ${maxRetries} attempts`;
+      logger.error(errorMessage);
       throw new Error(errorMessage);
     }
 
@@ -116,7 +125,7 @@ async function waitForRun({
     const runStatus = `${runInfo} | status: ${run.status}`;
 
     if (run.status !== lastSeenStatus) {
-      logger.debug(`[${run.status}] ${runInfo}`);
+      logger.info(`[waitForRun] Status changed: [${run.status}] ${runInfo}`);
       lastSeenStatus = run.status;
     }
 
@@ -126,8 +135,9 @@ async function waitForRun({
     try {
       const timeoutMessage = `[heartbeat ${i}] ${runIdLog} | Cancel Status check operation timed out.`;
       cancelStatus = await withTimeout(cache.get(cacheKey), raceTimeoutMs, timeoutMessage);
+      logger.debug(`[waitForRun] Cancel status for ${cacheKey}: ${cancelStatus}`);
     } catch (error) {
-      logger.warn(`Error retrieving cancel status: ${error}`);
+      logger.warn(`[waitForRun] Error retrieving cancel status: ${error}`);
     }
 
     if (cancelStatus === 'cancelled') {
@@ -136,7 +146,7 @@ async function waitForRun({
     }
 
     if (![RunStatus.IN_PROGRESS, RunStatus.QUEUED].includes(run.status)) {
-      logger.debug(`[FINAL] ${runInfo} | status: ${run.status}`);
+      logger.info(`[waitForRun] [FINAL] ${runInfo} | status: ${run.status}`);
       await runManager.fetchRunSteps({
         openai,
         thread_id: thread_id,
@@ -155,16 +165,18 @@ async function waitForRun({
       runStatus: run.status,
     });
 
+    logger.debug(`[waitForRun] Sleeping for pollIntervalMs=${pollIntervalMs}`);
     await sleep(pollIntervalMs);
     timeElapsed += pollIntervalMs;
   }
 
   if (timeElapsed >= timeout) {
     const timeoutMessage = `[waitForRun] ${runInfo} | status: ${run.status} | timed out after ${timeout} ms`;
-    logger.warn(timeoutMessage);
+    logger.error(timeoutMessage);
     throw new Error(timeoutMessage);
   }
 
+  logger.info(`[waitForRun] Returning run for ${runInfo} with status=${run.status}`);
   return run;
 }
 
@@ -179,8 +191,15 @@ async function waitForRun({
  * @return {Promise<RunStep[]>} A promise that resolves to an array of RunStep objects.
  */
 async function _retrieveRunSteps({ openai, thread_id, run_id }) {
-  const runSteps = await openai.beta.threads.runs.steps.list(run_id, { thread_id });
-  return runSteps;
+  logger.info(`[Runs/_retrieveRunSteps] Called for thread_id=${thread_id}, run_id=${run_id}`);
+  try {
+    const runSteps = await openai.beta.threads.runs.steps.list(run_id, { thread_id });
+    logger.info(`[Runs/_retrieveRunSteps] Retrieved ${runSteps?.data?.length ?? 0} steps for run_id=${run_id}`);
+    return runSteps;
+  } catch (error) {
+    logger.error(`[Runs/_retrieveRunSteps] Error retrieving steps for run_id=${run_id}:`, error);
+    throw error;
+  }
 }
 
 /**
