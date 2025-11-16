@@ -23,12 +23,24 @@ const { updateUserPluginsService, deleteUserKey } = require('~/server/services/U
 const { verifyEmail, resendVerificationEmail } = require('~/server/services/AuthService');
 const { needsRefresh, getNewS3URL } = require('~/server/services/Files/S3/crud');
 const { processDeleteRequest } = require('~/server/services/Files/process');
-const { Transaction, Balance, User, Token } = require('~/db/models');
+const {
+  Transaction,
+  Balance,
+  User,
+  Token,
+  Assistant,
+  ConversationTag,
+  MemoryEntry,
+  Action,
+  Group,
+} = require('~/db/models');
 const { getMCPManager, getFlowStateManager } = require('~/config');
 const { getAppConfig } = require('~/server/services/Config');
 const { deleteToolCalls } = require('~/models/ToolCall');
 const { getLogStores } = require('~/cache');
 const { mcpServersRegistry } = require('@librechat/api');
+const { getAgents, deleteAgent } = require('~/models/Agent');
+const { getAllPromptGroups, deletePromptGroup } = require('~/models/Prompt');
 
 const getUserController = async (req, res) => {
   const appConfig = await getAppConfig({ role: req.user?.role });
@@ -93,6 +105,40 @@ const deleteUserFiles = async (req) => {
     });
   } catch (error) {
     logger.error('[deleteUserFiles]', error);
+  }
+};
+
+const deleteUserAgents = async (userId) => {
+  try {
+    const userAgents = await getAgents({ author: userId });
+    const promises = userAgents.map(async (agent) => {
+      try {
+        await deleteAgent({ id: agent.id, author: userId });
+      } catch (error) {
+        logger.error(`[deleteUserAgents] Failed to delete agent ${agent.id}:`, error);
+        // Continue deleting other agents
+      }
+    });
+    await Promise.allSettled(promises);
+  } catch (error) {
+    logger.error('[deleteUserAgents] General error:', error);
+  }
+};
+
+const deleteUserPrompts = async (req, userId) => {
+  try {
+    const promptGroups = await getAllPromptGroups(req, { author: userId });
+    const promises = promptGroups.map(async (group) => {
+      try {
+        await deletePromptGroup({ _id: group._id });
+      } catch (error) {
+        logger.error(`[deleteUserPrompts] Failed to delete prompt group ${group._id}:`, error);
+        // Continue deleting other groups
+      }
+    });
+    await Promise.allSettled(promises);
+  } catch (error) {
+    logger.error('[deleteUserPrompts] General error:', error);
   }
 };
 
@@ -237,7 +283,6 @@ const deleteUserController = async (req, res) => {
     await deleteUserKey({ userId: user.id, all: true }); // delete user keys
     await Balance.deleteMany({ user: user._id }); // delete user balances
     await deletePresets(user.id); // delete user presets
-    /* TODO: Delete Assistant Threads */
     try {
       await deleteConvos(user.id); // delete user convos
     } catch (error) {
@@ -249,7 +294,17 @@ const deleteUserController = async (req, res) => {
     await deleteUserFiles(req); // delete user files
     await deleteFiles(null, user.id); // delete database files in case of orphaned files from previous steps
     await deleteToolCalls(user.id); // delete user tool calls
-    /* TODO: queue job for cleaning actions and assistants of non-existant users */
+    await deleteUserAgents(user.id); // delete user agents
+    await Assistant.deleteMany({ user: user.id }); // delete user assistants
+    await ConversationTag.deleteMany({ user: user.id }); // delete user conversation tags
+    await MemoryEntry.deleteMany({ userId: user.id }); // delete user memory entries
+    await deleteUserPrompts(req, user.id); // delete user prompts
+    await Action.deleteMany({ user: user.id }); // delete user actions
+    await Group.updateMany(
+      // remove user from all groups
+      { memberIds: user.id },
+      { $pull: { memberIds: user.id } },
+    );
     logger.info(`User deleted account. Email: ${user.email} ID: ${user.id}`);
     res.status(200).send({ message: 'User deleted' });
   } catch (err) {
